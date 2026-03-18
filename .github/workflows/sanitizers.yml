@@ -1,0 +1,99 @@
+name: Sanitizers
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  sanitize:
+    name: ${{ matrix.sanitizer }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+        sanitizer: [ address, memory, undefined, thread ]
+        exclude:
+          # Memory sanitizer is only available on Linux
+          - os: macos-latest
+            sanitizer: memory
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.14'
+
+      - name: Create build directory
+        run: mkdir -p build
+
+      - name: Configure CMake with ${{ matrix.sanitizer }} sanitizer
+        working-directory: build
+        env:
+          CC: clang
+          CXX: clang++
+          CFLAGS: -fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g
+          LDFLAGS: -fsanitize=${{ matrix.sanitizer }}
+        run: |
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DPQCSB_BUILD_TESTS=ON \
+            -DPQCSB_BUILD_SHARED=ON \
+            -DPQCSB_BUILD_STATIC=ON \
+            -DPQCSB_BUILD_CONCURRENT_TEST=OFF
+
+      - name: Build with ${{ matrix.sanitizer }} sanitizer
+        working-directory: build
+        run: cmake --build .
+
+      - name: Run tests with ${{ matrix.sanitizer }} sanitizer
+        working-directory: build
+        env:
+          ASAN_OPTIONS: ${{ runner.os == 'macOS' && 'halt_on_error=1' || 'detect_leaks=1:halt_on_error=1' }}
+          MSAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --output-on-failure
+
+  asan-malloc-fallback:
+    name: AddressSanitizer with malloc fallback
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.14'
+
+      - name: Create build directory
+        run: mkdir -p build
+
+      - name: Configure CMake with ASan and malloc fallback
+        working-directory: build
+        env:
+          CC: clang
+          CXX: clang++
+          CFLAGS: -fsanitize=address -fno-omit-frame-pointer -g
+          LDFLAGS: -fsanitize=address
+        run: |
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DPQCSB_BUILD_TESTS=ON \
+            -DPQCSB_ALLOW_MALLOC_FALLBACK=ON
+
+      - name: Build
+        working-directory: build
+        run: cmake --build .
+
+      - name: Run tests with AddressSanitizer
+        working-directory: build
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        run: ctest --output-on-failure

@@ -1,0 +1,9 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: pqcsb
+Description: Secure memory buffer for cryptographic key material
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lpqcsb
+Cflags: -I${includedir}

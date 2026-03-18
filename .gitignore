@@ -1,0 +1,11 @@
+build/
+dist/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+.DS_Store
+cmake-build-*/
+CMakeUserPresets.json
+.claude
