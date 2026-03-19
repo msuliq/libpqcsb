@@ -1,13 +1,98 @@
-name: Release
+name: Auto Release on Branch Merge
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  security-events: write
 
 jobs:
-  build-artifacts:
-    name: Build and upload release artifacts
+  # ============================================================
+  # VERSION DETECTION
+  # ============================================================
+  detect-version:
+    name: Detect version from merge
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      is-release: ${{ steps.detect.outputs.is-release }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect version from CMakeLists.txt
+        id: detect
+        run: |
+          # Get current version from CMakeLists.txt
+          CURRENT_VERSION=$(grep -A 3 "project(pqcsb" CMakeLists.txt | grep "VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+
+          # Cleanup orphaned tags (tags with no published release)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          for tag in $(git tag -l "v*"); do
+            TAG_HAS_RELEASE=$(gh release view "${tag}" 2>/dev/null && echo "true" || echo "false")
+            if [[ "$TAG_HAS_RELEASE" != "true" ]]; then
+              echo "Deleting orphaned tag: ${tag}"
+              git push origin --delete "${tag}" || true
+            fi
+          done
+
+          # Check if release already exists on GitHub for this version
+          RELEASE_EXISTS=$(gh release view "v$CURRENT_VERSION" 2>/dev/null && echo "true" || echo "false")
+
+          if [[ "$RELEASE_EXISTS" == "true" ]]; then
+            # Release already published for this version
+            echo "is-release=false" >> $GITHUB_OUTPUT
+            echo "Release v$CURRENT_VERSION already published. Skipping."
+          else
+            # No release published yet for this version - proceed
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "is-release=true" >> $GITHUB_OUTPUT
+            echo "No published release found for v$CURRENT_VERSION. Will create release."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================
+  # CREATE GIT TAG
+  # ============================================================
+  create-tag:
+    name: Create release tag
+    needs: detect-version
+    if: needs.detect-version.outputs.is-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Create and push tag
+        run: |
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+          echo "Created and pushed tag: v$VERSION"
+
+  # ============================================================
+  # BUILD & PACKAGE ARTIFACTS (no test re-run — trust CI)
+  # ============================================================
+  build-and-release:
+    name: Build and release artifacts
+    needs: [detect-version, create-tag]
+    if: needs.detect-version.outputs.is-release == 'true'
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -21,26 +106,47 @@ jobs:
           - os: windows-latest
             artifact_prefix: windows-x86_64
 
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: main
 
       - name: Set up CMake
         uses: jwlawson/actions-setup-cmake@v2
         with:
-          cmake-version: '3.14'
+          cmake-version: 'latest'
+
+      - name: Set up ccache (Unix)
+        if: runner.os != 'Windows'
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ${{ runner.os }}-release
+          max-size: 500M
+
+      - name: Set up sccache (Windows)
+        if: runner.os == 'Windows'
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          variant: sccache
+          key: ${{ runner.os }}-release
+          max-size: 500M
 
       - name: Create build directory
         run: mkdir -p build
 
-      - name: Configure CMake (Linux/macOS)
+      - name: Configure CMake (Unix)
         if: runner.os != 'Windows'
         working-directory: build
         run: |
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
-            -DPQCSB_BUILD_TESTS=ON \
+            -DPQCSB_BUILD_TESTS=OFF \
             -DPQCSB_BUILD_SHARED=ON \
-            -DPQCSB_BUILD_STATIC=ON
+            -DPQCSB_BUILD_STATIC=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
@@ -49,18 +155,18 @@ jobs:
           cmake .. `
             -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
-            -DPQCSB_BUILD_TESTS=ON `
+            -DPQCSB_BUILD_TESTS=OFF `
             -DPQCSB_BUILD_SHARED=ON `
-            -DPQCSB_BUILD_STATIC=ON
+            -DPQCSB_BUILD_STATIC=ON `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache
 
       - name: Build
         working-directory: build
         run: cmake --build . --config Release
 
-      - name: Run tests
-        working-directory: build
-        run: ctest --output-on-failure --build-config Release
-
+      # ============================================================
+      # PACKAGE
+      # ============================================================
       - name: Create release artifacts (Unix)
         if: runner.os != 'Windows'
         working-directory: build
@@ -69,8 +175,8 @@ jobs:
           cp -r ../include dist/
           cp libpqcsb.* dist/ 2>/dev/null || true
           cp pqcsb.pc dist/
-          tar -czf ../libpqcsb-${{ matrix.artifact_prefix }}.tar.gz dist/
-          ls -la ../libpqcsb-${{ matrix.artifact_prefix }}.tar.gz
+          tar -czf ../libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz dist/
+          ls -la ../libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz
 
       - name: Create release artifacts (Windows)
         if: runner.os == 'Windows'
@@ -82,47 +188,166 @@ jobs:
           copy *.dll dist\ || true
           copy *.pdb dist\ || true
           copy pqcsb.pc dist\
-          powershell -Command "& {Get-ChildItem -Path dist -Recurse}"
-          powershell -Command "& {Compress-Archive -Path dist -DestinationPath ../libpqcsb-${{ matrix.artifact_prefix }}.zip}"
+          powershell -Command "& {Compress-Archive -Path dist -DestinationPath ../libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip}"
 
-      - name: Upload artifacts
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            libpqcsb-*.tar.gz
-            libpqcsb-*.zip
+      # ============================================================
+      # SIGN (Cosign — keyless)
+      # ============================================================
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign artifacts (Unix)
+        if: runner.os != 'Windows'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_EXPERIMENTAL: 1
+        run: |
+          cosign sign-blob --yes \
+            libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz \
+            > libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz.sig
 
-  publish-docs:
-    name: Publish documentation
+      - name: Sign artifacts (Windows)
+        if: runner.os == 'Windows'
+        env:
+          COSIGN_EXPERIMENTAL: 1
+        run: |
+          cosign sign-blob --yes `
+            "libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip" `
+            | Out-File -FilePath "libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip.sig"
+
+      # ============================================================
+      # SBOM
+      # ============================================================
+      - name: Generate SBOM (Unix)
+        if: runner.os != 'Windows'
+        uses: anchore/sbom-action@v0
+        with:
+          file: libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz
+          format: spdx-json
+          output-file: libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.sbom.json
+          upload-artifact: false
+
+      - name: Generate SBOM (Windows)
+        if: runner.os == 'Windows'
+        uses: anchore/sbom-action@v0
+        with:
+          file: libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip
+          format: spdx-json
+          output-file: libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.sbom.json
+          upload-artifact: false
+
+
+      # ============================================================
+      # VALIDATE ARTIFACTS
+      # ============================================================
+      - name: Validate artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          TEST_DIR=$(mktemp -d)
+          tar -xzf libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz -C "$TEST_DIR"
+          test -f "$TEST_DIR/dist/include/pqcsb.h" || (echo "Missing pqcsb.h"; exit 1)
+          test -f "$TEST_DIR/dist/pqcsb.pc" || (echo "Missing pqcsb.pc"; exit 1)
+          echo "Artifact validation passed"
+          rm -rf "$TEST_DIR"
+
+      - name: Validate artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $TestDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
+          Expand-Archive -Path "libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip" -DestinationPath $TestDir
+          if (-Not (Test-Path "$TestDir/dist/include/pqcsb.h")) { throw "Missing pqcsb.h" }
+          if (-Not (Test-Path "$TestDir/dist/pqcsb.pc")) { throw "Missing pqcsb.pc" }
+          Write-Host "Artifact validation passed"
+          Remove-Item -Recurse -Force $TestDir
+
+      # ============================================================
+      # HASH FOR SLSA (used by provenance job)
+      # ============================================================
+      - name: Compute hashes
+        id: hash
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            certutil -hashfile "libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip" SHA256 | grep -v "SHA256" > HASHES
+          else
+            sha256sum libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.* > HASHES
+          fi
+          echo "hashes=$(cat HASHES | base64 -w0)" >> $GITHUB_OUTPUT
+
+      # ============================================================
+      # UPLOAD ARTIFACTS
+      # ============================================================
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.artifact_prefix }}
+          path: |
+            libpqcsb-*.tar.gz
+            libpqcsb-*.tar.gz.sig
+            libpqcsb-*.zip
+            libpqcsb-*.zip.sig
+            libpqcsb-*.sbom.json
+            HASHES
+
+  # ============================================================
+  # PUBLISH RELEASE
+  # ============================================================
+  publish-release:
+    name: Publish GitHub Release
+    needs: [detect-version, build-and-release]
+    if: needs.detect-version.outputs.is-release == 'true'
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v6
-
-      - name: Set up Pages
-        uses: actions/configure-pages@v4
-
-      - name: Upload documentation
-        uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          ref: main
+          fetch-depth: 0
 
-  deploy-docs:
-    name: Deploy documentation to GitHub Pages
-    runs-on: ubuntu-latest
-    needs: publish-docs
-    if: startsWith(github.ref, 'refs/tags/')
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
 
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v2
+      - name: Extract changelog entry
+        id: changelog
+        run: |
+          VERSION="v${{ needs.detect-version.outputs.version }}"
+          # Extract changelog section for this version
+          CHANGELOG=$(sed -n "/^## \[$VERSION/,/^## \[/p" CHANGELOG.md | head -n -1)
+
+          if [[ -z "$CHANGELOG" ]]; then
+              CHANGELOG="See commits for details"
+          fi
+
+          # Handle multiline in GitHub Actions
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
+          echo "body=$CHANGELOG" >> $GITHUB_OUTPUT
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p flat-artifacts
+          find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.tar.gz.sig" -o -name "*.zip" -o -name "*.zip.sig" -o -name "*.sbom.json" -o -name "*.intoto.jsonl" -o -name "HASHES" \) -exec cp {} flat-artifacts/ \;
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: flat-artifacts/*
+          body: |
+            ${{ steps.changelog.outputs.body }}
+
+            ## Verify artifact authenticity
+
+            See [SECURITY.md](https://github.com/${{ github.repository }}/blob/main/SECURITY.md) for verification instructions:
+            - Cosign keyless signature verification
+            - SHA256 checksum verification
+          tag_name: v${{ needs.detect-version.outputs.version }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

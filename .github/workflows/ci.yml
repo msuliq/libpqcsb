@@ -1,16 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [ main, develop ]
   pull_request:
     branches: [ main ]
 
 jobs:
   build:
     name: Build (${{ matrix.os }}, ${{ matrix.compiler }}, ${{ matrix.build_type }})
-    runs-on: ${{ matrix.os }}
-
+    uses: ./.github/workflows/build.yml
     strategy:
       fail-fast: false
       matrix:
@@ -19,11 +16,9 @@ jobs:
         build_type: [ Debug, Release ]
         malloc_fallback: [ OFF, ON ]
         exclude:
-          # Windows doesn't have gcc in the standard runner, only MSVC
           - os: windows-latest
             compiler: gcc
         include:
-          # MSVC on Windows
           - os: windows-latest
             compiler: msvc
             build_type: Debug
@@ -32,82 +27,22 @@ jobs:
             compiler: msvc
             build_type: Release
             malloc_fallback: OFF
+    with:
+      os: ${{ matrix.os }}
+      compiler: ${{ matrix.compiler }}
+      build_type: ${{ matrix.build_type }}
+      malloc_fallback: ${{ matrix.malloc_fallback }}
+      concurrent_tests: ${{ matrix.os == 'ubuntu-latest' }}
 
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up CMake
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '3.14'
-
-      - name: Set up compiler (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            sudo apt-get update
-            sudo apt-get install -y gcc g++
-          else
-            sudo apt-get update
-            sudo apt-get install -y clang
-          fi
-
-      - name: Set up compiler (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            brew install gcc
-          fi
-
-      - name: Create build directory
-        run: mkdir -p build
-
-      - name: Configure CMake (Ubuntu/macOS)
-        if: runner.os != 'Windows'
-        working-directory: build
-        env:
-          CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
-          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
-        run: |
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DPQCSB_BUILD_TESTS=ON \
-            -DPQCSB_BUILD_SHARED=ON \
-            -DPQCSB_BUILD_STATIC=ON \
-            -DPQCSB_ALLOW_MALLOC_FALLBACK=${{ matrix.malloc_fallback }} \
-            -DPQCSB_BUILD_CONCURRENT_TEST=OFF
-
-      - name: Configure CMake (Windows)
-        if: runner.os == 'Windows'
-        working-directory: build
-        run: |
-          cmake .. `
-            -G "Ninja" `
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
-            -DPQCSB_BUILD_TESTS=ON `
-            -DPQCSB_BUILD_SHARED=ON `
-            -DPQCSB_BUILD_STATIC=ON `
-            -DPQCSB_ALLOW_MALLOC_FALLBACK=${{ matrix.malloc_fallback }} `
-            -DPQCSB_BUILD_CONCURRENT_TEST=OFF
-
-      - name: Build
-        working-directory: build
-        run: cmake --build . --config ${{ matrix.build_type }}
-
-      - name: Run tests
-        working-directory: build
-        run: ctest --output-on-failure --build-config ${{ matrix.build_type }}
-
-  # coverage:
-  #   name: Code Coverage
-  #   runs-on: ubuntu-latest
-  #   # TODO: Re-enable after fixing lcov line mismatch issues with TEST macros
-  #   # Coverage builds are useful but currently lcov has trouble with the test
-  #   # helper macros that span multiple lines.
-  #
-  #   steps:
-  #     - uses: actions/checkout@v6
-  #     ... coverage job temporarily disabled ...
+  coverage:
+    name: Code Coverage
+    uses: ./.github/workflows/build.yml
+    with:
+      os: ubuntu-latest
+      compiler: clang
+      build_type: Debug
+      enable_coverage: true
+      build_tests: true
 
   static-analysis:
     name: Static Analysis
@@ -119,7 +54,7 @@ jobs:
       - name: Set up CMake
         uses: jwlawson/actions-setup-cmake@v2
         with:
-          cmake-version: '3.14'
+          cmake-version: 'latest'
 
       - name: Install analysis tools
         run: |
@@ -143,6 +78,10 @@ jobs:
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DPQCSB_BUILD_CONCURRENT_TEST=OFF
 
+      - name: Build
+        working-directory: build
+        run: cmake --build .
+
       - name: Run clang-tidy
         working-directory: build
         run: |
@@ -151,10 +90,22 @@ jobs:
             ../src/*.c \
             ../include/*.h \
             || true
+        continue-on-error: true
 
   pkg-config:
     name: Package Config Verification
+    uses: ./.github/workflows/build.yml
+    with:
+      os: ubuntu-latest
+      compiler: gcc
+      build_type: Release
+      build_tests: false
+      cmake_extra_flags: '-DCMAKE_C_COMPILER_LAUNCHER=ccache'
+
+  verify-pkg-config:
+    name: Verify pkg-config
     runs-on: ubuntu-latest
+    needs: pkg-config
 
     steps:
       - uses: actions/checkout@v6
@@ -162,7 +113,7 @@ jobs:
       - name: Set up CMake
         uses: jwlawson/actions-setup-cmake@v2
         with:
-          cmake-version: '3.14'
+          cmake-version: 'latest'
 
       - name: Create build directory
         run: mkdir -p build
@@ -172,7 +123,7 @@ jobs:
         run: |
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
-            -DPQCSB_BUILD_TESTS=ON \
+            -DPQCSB_BUILD_TESTS=OFF \
             -DPQCSB_BUILD_SHARED=ON \
             -DPQCSB_BUILD_STATIC=ON \
             -DPQCSB_BUILD_CONCURRENT_TEST=OFF
@@ -186,7 +137,6 @@ jobs:
         run: |
           ls -la pqcsb.pc
           cat pqcsb.pc
-          # Verify essential fields are present
           grep -q "^Name:" pqcsb.pc
           grep -q "^Version:" pqcsb.pc
           grep -q "^Description:" pqcsb.pc

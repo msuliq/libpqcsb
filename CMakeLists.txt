@@ -13,6 +13,7 @@ option(PQCSB_BUILD_TESTS            "Build test executables"   ON)
 option(PQCSB_BUILD_SHARED           "Build shared library"     ON)
 option(PQCSB_BUILD_STATIC           "Build static library"     ON)
 option(PQCSB_ALLOW_MALLOC_FALLBACK  "Allow malloc fallback (no guard pages, reduced security)" OFF)
+option(PQCSB_ENABLE_COVERAGE        "Enable gcov/gcovr coverage instrumentation" OFF)
 
 # ---- Platform feature detection ----
 
@@ -105,6 +106,16 @@ if(PQCSB_ALLOW_MALLOC_FALLBACK)
     add_compile_definitions(PQCSB_ALLOW_MALLOC_FALLBACK)
 endif()
 
+# ---- Handle coverage option ----
+
+if(PQCSB_ENABLE_COVERAGE AND NOT MSVC)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        message(WARNING "Coverage requires GCC or Clang")
+    else()
+        set(COVERAGE_FLAGS --coverage -fprofile-arcs -ftest-coverage)
+    endif()
+endif()
+
 # ---- Generate config header ----
 
 configure_file(
@@ -153,6 +164,10 @@ if(PQCSB_BUILD_STATIC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_compile_options(pqcsb_static PRIVATE ${PQCSB_COMPILE_OPTIONS})
+    if(DEFINED COVERAGE_FLAGS)
+        target_compile_options(pqcsb_static PRIVATE ${COVERAGE_FLAGS})
+        target_link_options(pqcsb_static PRIVATE --coverage)
+    endif()
 endif()
 
 if(PQCSB_BUILD_SHARED)
@@ -170,6 +185,10 @@ if(PQCSB_BUILD_SHARED)
     )
     target_compile_options(pqcsb_shared PRIVATE ${PQCSB_COMPILE_OPTIONS})
     target_compile_definitions(pqcsb_shared PRIVATE PQCSB_BUILDING_SHARED)
+    if(DEFINED COVERAGE_FLAGS)
+        target_compile_options(pqcsb_shared PRIVATE ${COVERAGE_FLAGS})
+        target_link_options(pqcsb_shared PRIVATE --coverage)
+    endif()
 
     check_c_compiler_flag(-fvisibility=hidden HAS_VISIBILITY_HIDDEN)
     if(HAS_VISIBILITY_HIDDEN)
@@ -245,6 +264,15 @@ if(PQCSB_BUILD_TESTS)
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()
 
+    # ---- Apply coverage flags to test targets ----
+    if(DEFINED COVERAGE_FLAGS)
+        foreach(test_src ${PQCSB_TEST_SOURCES})
+            get_filename_component(test_name ${test_src} NAME_WE)
+            target_compile_options(${test_name} PRIVATE ${COVERAGE_FLAGS})
+            target_link_options(${test_name} PRIVATE --coverage)
+        endforeach()
+    endif()
+
     # ---- Concurrent test (requires threading, optional) ----
     # Note: Concurrent stress testing is available but disabled by default
     # due to platform-specific mprotect timing issues under high concurrency.
@@ -258,6 +286,10 @@ if(PQCSB_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/include
         )
         target_compile_options(test_concurrent PRIVATE ${PQCSB_COMPILE_OPTIONS})
+        if(DEFINED COVERAGE_FLAGS)
+            target_compile_options(test_concurrent PRIVATE ${COVERAGE_FLAGS})
+            target_link_options(test_concurrent PRIVATE --coverage)
+        endif()
         add_test(NAME test_concurrent COMMAND test_concurrent)
     endif()
 endif()

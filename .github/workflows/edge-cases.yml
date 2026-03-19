@@ -9,140 +9,43 @@ on:
 jobs:
   minimal-config:
     name: Minimal build configuration
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up CMake
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '3.14'
-
-      - name: Create build directory
-        run: mkdir -p build
-
-      - name: Configure with minimal options (static only)
-        working-directory: build
-        run: |
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DPQCSB_BUILD_TESTS=OFF \
-            -DPQCSB_BUILD_SHARED=OFF \
-            -DPQCSB_BUILD_STATIC=ON
-
-      - name: Build
-        working-directory: build
-        run: cmake --build .
-
-      - name: Verify artifact
-        working-directory: build
-        run: |
-          ls -la libpqcsb.a || ls -la pqcsb.lib || true
+    uses: ./.github/workflows/build.yml
+    with:
+      os: ubuntu-latest
+      compiler: gcc
+      build_type: Release
+      build_tests: false
+      cmake_extra_flags: '-DPQCSB_BUILD_SHARED=OFF'
 
   malloc-fallback-only:
     name: Malloc fallback (no mmap)
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up CMake
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '3.14'
-
-      - name: Create build directory
-        run: mkdir -p build
-
-      - name: Configure with malloc fallback
-        working-directory: build
-        run: |
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DPQCSB_BUILD_TESTS=ON \
-            -DPQCSB_ALLOW_MALLOC_FALLBACK=ON \
-            -DPQCSB_BUILD_CONCURRENT_TEST=OFF
-
-      - name: Build
-        working-directory: build
-        run: cmake --build .
-
-      - name: Run tests with malloc fallback
-        working-directory: build
-        run: ctest --output-on-failure
+    uses: ./.github/workflows/build.yml
+    with:
+      os: ubuntu-latest
+      compiler: gcc
+      build_type: Debug
+      malloc_fallback: 'ON'
+      build_tests: true
 
   windows-static-only:
     name: Windows static library build
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up CMake
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '3.14'
-
-      - name: Create build directory
-        run: mkdir -p build
-
-      - name: Configure (static only)
-        working-directory: build
-        run: |
-          cmake .. `
-            -G "Ninja" `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DPQCSB_BUILD_TESTS=OFF `
-            -DPQCSB_BUILD_SHARED=OFF `
-            -DPQCSB_BUILD_STATIC=ON
-
-      - name: Build
-        working-directory: build
-        run: cmake --build . --config Release
-
-      - name: Verify artifact
-        working-directory: build
-        run: |
-          # Ninja puts artifacts directly in build dir, Visual Studio uses Release subdir
-          if (Test-Path "pqcsb.lib") { Write-Host "Found pqcsb.lib" } `
-          elseif (Test-Path "Release\pqcsb.lib") { Write-Host "Found Release\pqcsb.lib" } `
-          elseif (Test-Path "libpqcsb.a") { Write-Host "Found libpqcsb.a" } `
-          else { exit 1 }
+    uses: ./.github/workflows/build.yml
+    with:
+      os: windows-latest
+      compiler: msvc
+      build_type: Release
+      build_tests: false
+      cmake_extra_flags: '-DPQCSB_BUILD_SHARED=OFF'
 
   pedantic-compilation:
     name: Pedantic compiler flags
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up CMake
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '3.14'
-
-      - name: Create build directory
-        run: mkdir -p build
-
-      - name: Configure with pedantic flags
-        working-directory: build
-        env:
-          CFLAGS: -Wall -Wextra -Werror -Wpedantic -std=c11
-        run: |
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DPQCSB_BUILD_TESTS=ON \
-            -DPQCSB_BUILD_SHARED=ON \
-            -DPQCSB_BUILD_STATIC=ON
-
-      - name: Build with warnings as errors
-        working-directory: build
-        run: cmake --build .
-
-      - name: Run tests
-        working-directory: build
-        run: ctest --output-on-failure
+    uses: ./.github/workflows/build.yml
+    with:
+      os: ubuntu-latest
+      compiler: clang
+      build_type: Release
+      build_tests: true
+      cmake_extra_flags: '-DCMAKE_C_FLAGS="-Wall -Wextra -Werror -Wpedantic"'
 
   cross-compile-check:
     name: Check cross-compile readiness
@@ -153,7 +56,6 @@ jobs:
 
       - name: Verify CMakeLists.txt structure
         run: |
-          # Check for platform detection
           grep -q "check_include_file" CMakeLists.txt
           grep -q "check_symbol_exists" CMakeLists.txt
           grep -q "HAVE_" CMakeLists.txt
@@ -168,6 +70,5 @@ jobs:
 
       - name: Check for platform-specific code
         run: |
-          # Verify all platform conditionals are wrapped
           grep -q "#ifdef __" src/*.c || echo "Note: No platform-specific code in src/"
           echo "✓ Platform detection in place"

@@ -1,7 +1,9 @@
 # libpqcsb - Secure Memory Buffer for Cryptographic Key Material
 
+[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/msuliq/libpqcsb/releases/tag/v0.1.2)
 [![C11 Standard](https://img.shields.io/badge/C-11-brightgreen.svg)]()
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/msuliq/libpqcsb/release.yml?label=release)](https://github.com/msuliq/libpqcsb/actions/workflows/release.yml)
 
 A standalone C library providing **mmap/mprotect/mlock-backed secure memory buffers** for cryptographic keys. Zero external dependencies. Portable across Linux, macOS, FreeBSD, and Windows.
 
@@ -605,10 +607,6 @@ Contributions welcome! Please:
 
 ## See Also
 
-- **libpqcasn1** - DER/PEM/Base64 codec for PQC algorithms
-- **libsodium** - General-purpose cryptography library (higher-level)
-- **WolfSSL** - Lightweight TLS library with secure memory options
-
----
-
-Generated with ❤️ for the Post-Quantum Cryptography Initiative.
+- **[libpqcasn1](https://github.com/msuliq/libpqcasn1)** - DER/PEM/Base64 codec for PQC algorithms
+- **[libsodium](https://github.com/jedisct1/libsodium)** - General-purpose cryptography library (higher-level)
+- **[WolfSSL](https://github.com/wolfSSL/wolfssl)** - Lightweight TLS library with secure memory options
