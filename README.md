@@ -605,10 +605,6 @@ Contributions welcome! Please:
 
 ## See Also
 
-- **libpqcasn1** - DER/PEM/Base64 codec for PQC algorithms
-- **libsodium** - General-purpose cryptography library (higher-level)
-- **WolfSSL** - Lightweight TLS library with secure memory options
-
----
-
-Generated with ❤️ for the Post-Quantum Cryptography Initiative.
+- **[libpqcasn1](https://github.com/msuliq/libpqcasn1)** - DER/PEM/Base64 codec for PQC algorithms
+- **[libsodium](https://github.com/jedisct1/libsodium)** - General-purpose cryptography library (higher-level)
+- **[WolfSSL](https://github.com/wolfSSL/wolfssl)** - Lightweight TLS library with secure memory options

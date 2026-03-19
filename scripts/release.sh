@@ -41,7 +41,7 @@ if [[ -n $(git status -s) ]]; then
 fi
 
 # Get current version from CMakeLists.txt
-CURRENT_VERSION=$(grep "VERSION" CMakeLists.txt | grep "project(" -A 2 | grep VERSION | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+CURRENT_VERSION=$(grep -A 3 "project(pqcsb" CMakeLists.txt | grep "VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 if [[ -z "$CURRENT_VERSION" ]]; then
     echo "Error: Could not extract current version from CMakeLists.txt"
     exit 1
