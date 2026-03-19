@@ -9,3 +9,4 @@ dist/
 cmake-build-*/
 CMakeUserPresets.json
 .claude
+.local_docs
