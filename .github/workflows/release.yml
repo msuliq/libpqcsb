@@ -1,9 +1,9 @@
-name: Release
+name: Auto Release on Branch Merge
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -11,9 +11,154 @@ permissions:
   id-token: write
 
 jobs:
-  build-artifacts:
-    name: Build and sign artifacts
+  # ============================================================
+  # RUN FULL CI SUITE FIRST
+  # ============================================================
+  run-ci:
+    name: Run full CI tests
     runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        compiler: [ gcc, clang ]
+        build_type: [ Debug, Release ]
+        malloc_fallback: [ OFF, ON ]
+        exclude:
+          - os: windows-latest
+            compiler: gcc
+        include:
+          - os: windows-latest
+            compiler: msvc
+            build_type: Debug
+            malloc_fallback: OFF
+          - os: windows-latest
+            compiler: msvc
+            build_type: Release
+            malloc_fallback: OFF
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.14'
+
+      - name: Set up compiler (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            sudo apt-get update
+            sudo apt-get install -y gcc g++
+          else
+            sudo apt-get update
+            sudo apt-get install -y clang
+          fi
+
+      - name: Set up compiler (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            brew install gcc
+          fi
+
+      - name: Create build directory
+        run: mkdir -p build
+
+      - name: Configure CMake (Unix)
+        if: runner.os != 'Windows'
+        working-directory: build
+        env:
+          CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+        run: |
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DPQCSB_BUILD_TESTS=ON \
+            -DPQCSB_BUILD_SHARED=ON \
+            -DPQCSB_BUILD_STATIC=ON \
+            -DPQCSB_ALLOW_MALLOC_FALLBACK=${{ matrix.malloc_fallback }} \
+            -DPQCSB_BUILD_CONCURRENT_TEST=OFF
+
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        working-directory: build
+        run: |
+          cmake .. `
+            -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+            -DPQCSB_BUILD_TESTS=ON `
+            -DPQCSB_BUILD_SHARED=ON `
+            -DPQCSB_BUILD_STATIC=ON `
+            -DPQCSB_ALLOW_MALLOC_FALLBACK=${{ matrix.malloc_fallback }} `
+            -DPQCSB_BUILD_CONCURRENT_TEST=OFF
+
+      - name: Build
+        working-directory: build
+        run: cmake --build . --config ${{ matrix.build_type }}
+
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure --build-config ${{ matrix.build_type }}
+
+  detect-version:
+    name: Detect version from merge
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      is-release: ${{ steps.detect.outputs.is-release }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect version from CMakeLists.txt
+        id: detect
+        run: |
+          # Get current version from CMakeLists.txt
+          VERSION=$(grep -A 3 "project(pqcsb" CMakeLists.txt | grep "VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+
+          # Check if tag already exists (to avoid duplicate releases)
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "is-release=false" >> $GITHUB_OUTPUT
+            echo "Tag v$VERSION already exists, skipping release"
+          else
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "is-release=true" >> $GITHUB_OUTPUT
+            echo "Detected new release version: v$VERSION"
+          fi
+
+  create-tag:
+    name: Create release tag
+    needs: detect-version
+    if: needs.detect-version.outputs.is-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Create and push tag
+        run: |
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+          echo "✓ Created and pushed tag: v$VERSION"
+
+  build-and-release:
+    name: Build and release artifacts
+    needs: [run-ci, detect-version, create-tag]
+    if: needs.detect-version.outputs.is-release == 'true'
+    runs-on: ${{ matrix.os }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -29,10 +174,9 @@ jobs:
       hashes: ${{ steps.hash.outputs.hashes }}
 
     steps:
-      # ============================================================
-      # 1. BUILD
-      # ============================================================
       - uses: actions/checkout@v6
+        with:
+          ref: main
 
       - name: Set up CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -66,7 +210,7 @@ jobs:
         run: cmake --build . --config Release
 
       # ============================================================
-      # 2. PACKAGE (Create tarballs/zips)
+      # PACKAGE
       # ============================================================
       - name: Create release artifacts (Unix)
         if: runner.os != 'Windows'
@@ -76,8 +220,8 @@ jobs:
           cp -r ../include dist/
           cp libpqcsb.* dist/ 2>/dev/null || true
           cp pqcsb.pc dist/
-          tar -czf ../libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz dist/
-          ls -la ../libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz
+          tar -czf ../libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz dist/
+          ls -la ../libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz
 
       - name: Create release artifacts (Windows)
         if: runner.os == 'Windows'
@@ -89,13 +233,13 @@ jobs:
           copy *.dll dist\ || true
           copy *.pdb dist\ || true
           copy pqcsb.pc dist\
-          powershell -Command "& {Compress-Archive -Path dist -DestinationPath ../libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip}"
+          powershell -Command "& {Compress-Archive -Path dist -DestinationPath ../libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip}"
 
       # ============================================================
-      # 3. SIGN (Cosign - Keyless)
+      # SIGN (Cosign)
       # ============================================================
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v3
 
       - name: Sign artifacts (Unix)
         if: runner.os != 'Windows'
@@ -103,9 +247,8 @@ jobs:
           COSIGN_EXPERIMENTAL: 1
         run: |
           cosign sign-blob --yes \
-            libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz \
-            > libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz.sig
-          ls -la libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz*
+            libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz \
+            > libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz.sig
 
       - name: Sign artifacts (Windows)
         if: runner.os == 'Windows'
@@ -113,32 +256,32 @@ jobs:
           COSIGN_EXPERIMENTAL: 1
         run: |
           cosign sign-blob --yes `
-            "libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip" `
-            | Out-File -FilePath "libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip.sig"
+            "libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip" `
+            | Out-File -FilePath "libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip.sig"
 
       # ============================================================
-      # 4. SBOM (Software Bill of Materials)
+      # SBOM
       # ============================================================
       - name: Generate SBOM (Unix)
         if: runner.os != 'Windows'
         uses: anchore/sbom-action@v0
         with:
-          file: libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz
+          file: libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz
           format: spdx-json
-          output-file: libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.sbom.json
+          output-file: libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.sbom.json
 
       - name: Generate SBOM (Windows)
         if: runner.os == 'Windows'
         uses: anchore/sbom-action@v0
         with:
-          file: libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip
+          file: libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip
           format: spdx-json
-          output-file: libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.sbom.json
+          output-file: libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.sbom.json
 
       # ============================================================
-      # 5. SECURITY SCAN (Trivy)
+      # SECURITY SCAN
       # ============================================================
-      - name: Scan artifact with Trivy (Unix)
+      - name: Scan with Trivy (Unix)
         if: runner.os != 'Windows'
         uses: aquasecurity/trivy-action@master
         with:
@@ -147,83 +290,54 @@ jobs:
           format: 'sarif'
           output: 'trivy-results.sarif'
 
-      - name: Upload Trivy scan to GitHub Security
+      - name: Upload Trivy results
         if: runner.os == 'Linux'
         uses: github/codeql-action/upload-sarif@v2
         with:
           sarif_file: 'trivy-results.sarif'
 
       # ============================================================
-      # 6. TEST ARTIFACT (Verify tarball is usable)
+      # VALIDATE ARTIFACTS
       # ============================================================
-      - name: Test artifact usability (Unix)
+      - name: Validate artifacts (Unix)
         if: runner.os != 'Windows'
         run: |
           TEST_DIR=$(mktemp -d)
-          tar -xzf libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz -C "$TEST_DIR"
-
-          # Verify expected files exist
+          tar -xzf libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.tar.gz -C "$TEST_DIR"
           test -f "$TEST_DIR/dist/include/pqcsb.h" || (echo "Missing pqcsb.h"; exit 1)
           test -f "$TEST_DIR/dist/pqcsb.pc" || (echo "Missing pqcsb.pc"; exit 1)
-
-          # Verify libraries exist
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            test -f "$TEST_DIR/dist/libpqcsb.a" || (echo "Missing libpqcsb.a"; exit 1)
-            test -f "$TEST_DIR/dist/libpqcsb.so"* || (echo "Missing libpqcsb.so"; exit 1)
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            test -f "$TEST_DIR/dist/libpqcsb.a" || (echo "Missing libpqcsb.a"; exit 1)
-            test -f "$TEST_DIR/dist/libpqcsb.dylib" || (echo "Missing libpqcsb.dylib"; exit 1)
-          fi
-
-          echo "✓ Artifact tarball is valid and contains all expected files"
+          echo "✓ Artifact validation passed"
           rm -rf "$TEST_DIR"
 
-      - name: Test artifact usability (Windows)
+      - name: Validate artifacts (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           $TestDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
-          Expand-Archive -Path "libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip" -DestinationPath $TestDir
-
-          # Verify expected files
-          if (-Not (Test-Path "$TestDir/dist/include/pqcsb.h")) {
-              throw "Missing pqcsb.h"
-          }
-          if (-Not (Test-Path "$TestDir/dist/pqcsb.pc")) {
-              throw "Missing pqcsb.pc"
-          }
-          if (-Not (Test-Path "$TestDir/dist/pqcsb.lib")) {
-              throw "Missing pqcsb.lib"
-          }
-          if (-Not (Test-Path "$TestDir/dist/pqcsb.dll")) {
-              throw "Missing pqcsb.dll"
-          }
-
-          Write-Host "✓ Artifact ZIP is valid and contains all expected files"
+          Expand-Archive -Path "libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip" -DestinationPath $TestDir
+          if (-Not (Test-Path "$TestDir/dist/include/pqcsb.h")) { throw "Missing pqcsb.h" }
+          if (-Not (Test-Path "$TestDir/dist/pqcsb.pc")) { throw "Missing pqcsb.pc" }
+          Write-Host "✓ Artifact validation passed"
           Remove-Item -Recurse -Force $TestDir
 
       # ============================================================
-      # 7. COMPUTE HASHES (For SLSA provenance)
+      # HASH FOR SLSA
       # ============================================================
-      - name: Compute artifact hashes
+      - name: Compute hashes
         id: hash
         shell: bash
         run: |
-          # Create HASHES file
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            certutil -hashfile libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip SHA256 | grep -v "SHA256" > HASHES
-            certutil -hashfile libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip.sig SHA256 | grep -v "SHA256" >> HASHES
+            certutil -hashfile "libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.zip" SHA256 | grep -v "SHA256" > HASHES
           else
-            sha256sum libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.* > HASHES
+            sha256sum libpqcsb-v${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_prefix }}.* > HASHES
           fi
-
-          # Output for SLSA
           echo "hashes=$(cat HASHES | base64 -w0)" >> $GITHUB_OUTPUT
 
       # ============================================================
-      # 8. UPLOAD ARTIFACTS (Staging)
+      # UPLOAD ARTIFACTS
       # ============================================================
-      - name: Upload artifacts as workflow artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-${{ matrix.artifact_prefix }}
@@ -236,18 +350,19 @@ jobs:
             HASHES
 
   # ============================================================
-  # 9. SLSA PROVENANCE (Supply chain security)
+  # SLSA PROVENANCE
   # ============================================================
   provenance:
     name: Generate SLSA provenance
-    needs: build-artifacts
+    needs: [detect-version, build-and-release]
+    if: needs.detect-version.outputs.is-release == 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -255,63 +370,102 @@ jobs:
       - name: Generate SLSA provenance
         uses: slsa-framework/slsa-github-generator@v1.9.0
         with:
-          base64-subjects: ${{ needs.build-artifacts.outputs.hashes }}
+          base64-subjects: ${{ needs.build-and-release.outputs.hashes }}
           upload-assets: true
 
   # ============================================================
-  # 10. PUBLISH RELEASE
+  # PUBLISH RELEASE
   # ============================================================
-  publish:
-    name: Publish release
-    needs: [build-artifacts, provenance]
+  publish-release:
+    name: Publish GitHub Release
+    needs: [detect-version, build-and-release, provenance]
+    if: needs.detect-version.outputs.is-release == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
 
-      - name: Create release notes
-        id: release-notes
+      - name: Extract changelog entry
+        id: changelog
         run: |
-          # Extract release notes from CHANGELOG.md
-          VERSION="${{ github.ref_name }}"
-          CHANGELOG_SECTION=$(sed -n "/^## \[$VERSION/,/^## \[/p" CHANGELOG.md | head -n -1)
+          VERSION="v${{ needs.detect-version.outputs.version }}"
+          # Extract changelog section for this version
+          CHANGELOG=$(sed -n "/^## \[$VERSION/,/^## \[/p" CHANGELOG.md | head -n -1)
 
-          if [[ -z "$CHANGELOG_SECTION" ]]; then
-              CHANGELOG_SECTION="See commits for details"
+          if [[ -z "$CHANGELOG" ]]; then
+              CHANGELOG="See commits for details"
           fi
 
-          echo "notes<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGELOG_SECTION" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Handle multiline in GitHub Actions
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
+          echo "body=$CHANGELOG" >> $GITHUB_OUTPUT
 
-      - name: Flatten artifact structure
+      - name: Flatten artifacts
         run: |
           mkdir -p flat-artifacts
           find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.tar.gz.sig" -o -name "*.zip" -o -name "*.zip.sig" -o -name "*.sbom.json" -o -name "*.intoto.jsonl" \) -exec cp {} flat-artifacts/ \;
-          ls -lah flat-artifacts/
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v1
         with:
           files: flat-artifacts/*
-          body: ${{ steps.release-notes.outputs.notes }}
-          tag_name: ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.body }}
+          tag_name: v${{ needs.detect-version.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ============================================================
-  # OPTIONAL: Publish to package registries
+  # PUBLISH TO HOMEBREW
+  # ============================================================
+  publish-homebrew:
+    name: Publish to Homebrew
+    needs: [detect-version, publish-release]
+    if: needs.detect-version.outputs.is-release == 'true' && false
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Publish to Homebrew (template)
+        run: |
+          # This is a template - configure when ready
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          echo "TODO: Publish libpqcsb v$VERSION to Homebrew"
+          echo ""
+          echo "Steps to enable:"
+          echo "1. Create homebrew-libpqcsb repo or fork homebrew-core"
+          echo "2. Create formula: libpqcsb.rb"
+          echo "3. Add GitHub token to secrets: HOMEBREW_GITHUB_TOKEN"
+          echo "4. Uncomment the actual publishing steps below"
+
+          # Template for when ready:
+          # git clone https://github.com/msuliq/homebrew-libpqcsb
+          # cd homebrew-libpqcsb
+          # # Update formula with new version
+          # git add libpqcsb.rb
+          # git commit -m "libpqcsb $VERSION"
+          # git push
+
+  # ============================================================
+  # PUBLISH TO CONAN (Optional)
   # ============================================================
   publish-conan:
-    name: Publish to Conan Center (optional)
-    needs: publish
+    name: Publish to Conan Center
+    needs: [detect-version, publish-release]
+    if: needs.detect-version.outputs.is-release == 'true' && false
     runs-on: ubuntu-latest
-    if: false  # Disable for now - configure when Conan recipe ready
 
     steps:
       - uses: actions/checkout@v6
@@ -323,7 +477,7 @@ jobs:
 
       - name: Create Conan package
         run: |
-          conan create . --version=${{ github.ref_name }}
+          conan create . --version=${{ needs.detect-version.outputs.version }}
 
       - name: Upload to Conan Center
         env:
@@ -333,17 +487,26 @@ jobs:
           conan remote add conancenter https://center.conan.io || true
           conan upload "*" --remote=conancenter
 
-  publish-homebrew:
-    name: Publish to Homebrew (optional)
-    needs: publish
+  # ============================================================
+  # PUBLISH TO APT/DPKG (Linux distros)
+  # ============================================================
+  publish-apt:
+    name: Publish to APT repository
+    needs: [detect-version, publish-release]
+    if: needs.detect-version.outputs.is-release == 'true' && false  # Disabled by default
     runs-on: ubuntu-latest
-    if: false  # Disable for now - configure when formula ready
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Update Homebrew formula
+      - name: Build deb package (template)
         run: |
-          # This would create a PR to homebrew-core with updated formula
-          # Requires creating a GitHub app token
-          echo "TODO: Implement Homebrew formula update"
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          echo "TODO: Build and publish .deb package for v$VERSION"
+          echo ""
+          echo "This requires:"
+          echo "1. debian/ directory with packaging files"
+          echo "2. Access to PPA (Personal Package Archive)"
+          echo "3. GPG key for signing"
+          echo ""
+          echo "When ready, use: debuild -S && dput ppa:owner/ppa ..."

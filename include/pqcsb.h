@@ -64,7 +64,7 @@ extern "C" {
 #define PQCSB_VERSION_MINOR 1
 #define PQCSB_VERSION_PATCH 3
 
-#define PQCSB_VERSION_STRING "0.1.1"
+#define PQCSB_VERSION_STRING "0.1.2"
 
 /* ------------------------------------------------------------------ */
 /* Status codes                                                        */
