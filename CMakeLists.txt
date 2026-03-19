@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 project(pqcsb
-    VERSION 0.1.1
+    VERSION 0.1.2
     DESCRIPTION "Secure memory buffer for cryptographic key material"
     LANGUAGES C)
 

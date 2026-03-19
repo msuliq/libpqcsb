@@ -5,11 +5,15 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
 jobs:
   build-artifacts:
-    name: Build and upload release artifacts
+    name: Build and sign artifacts
     runs-on: ${{ matrix.os }}
-
     strategy:
       fail-fast: false
       matrix:
@@ -21,7 +25,13 @@ jobs:
           - os: windows-latest
             artifact_prefix: windows-x86_64
 
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+
     steps:
+      # ============================================================
+      # 1. BUILD
+      # ============================================================
       - uses: actions/checkout@v6
 
       - name: Set up CMake
@@ -32,7 +42,7 @@ jobs:
       - name: Create build directory
         run: mkdir -p build
 
-      - name: Configure CMake (Linux/macOS)
+      - name: Configure CMake (Unix)
         if: runner.os != 'Windows'
         working-directory: build
         run: |
@@ -61,6 +71,9 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure --build-config Release
 
+      # ============================================================
+      # 2. PACKAGE (Create tarballs/zips)
+      # ============================================================
       - name: Create release artifacts (Unix)
         if: runner.os != 'Windows'
         working-directory: build
@@ -72,20 +85,6 @@ jobs:
           tar -czf ../libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz dist/
           ls -la ../libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz
 
-      - name: Install Cosign (Unix)
-        if: runner.os != 'Windows'
-        uses: sigstore/cosign-installer@v4
-
-      - name: Sign release artifacts (Unix)
-        if: runner.os != 'Windows'
-        env:
-          COSIGN_EXPERIMENTAL: 1
-        run: |
-          cosign sign-blob --yes \
-            libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz \
-            > libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz.sig
-          ls -la libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz*
-
       - name: Create release artifacts (Windows)
         if: runner.os == 'Windows'
         working-directory: build
@@ -96,14 +95,25 @@ jobs:
           copy *.dll dist\ || true
           copy *.pdb dist\ || true
           copy pqcsb.pc dist\
-          powershell -Command "& {Get-ChildItem -Path dist -Recurse}"
           powershell -Command "& {Compress-Archive -Path dist -DestinationPath ../libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip}"
 
-      - name: Install Cosign (Windows)
-        if: runner.os == 'Windows'
+      # ============================================================
+      # 3. SIGN (Cosign - Keyless)
+      # ============================================================
+      - name: Install Cosign
         uses: sigstore/cosign-installer@v4
 
-      - name: Sign release artifacts (Windows)
+      - name: Sign artifacts (Unix)
+        if: runner.os != 'Windows'
+        env:
+          COSIGN_EXPERIMENTAL: 1
+        run: |
+          cosign sign-blob --yes \
+            libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz \
+            > libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz.sig
+          ls -la libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz*
+
+      - name: Sign artifacts (Windows)
         if: runner.os == 'Windows'
         env:
           COSIGN_EXPERIMENTAL: 1
@@ -111,47 +121,235 @@ jobs:
           cosign sign-blob --yes `
             "libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip" `
             | Out-File -FilePath "libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip.sig"
-          Get-ChildItem -Path "libpqcsb-*" -Filter "*.sig"
 
-      - name: Upload artifacts
-        uses: softprops/action-gh-release@v1
+      # ============================================================
+      # 4. SBOM (Software Bill of Materials)
+      # ============================================================
+      - name: Generate SBOM (Unix)
+        if: runner.os != 'Windows'
+        uses: anchore/sbom-action@v0
         with:
-          files: |
+          file: libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz
+          format: spdx-json
+          output-file: libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.sbom.json
+
+      - name: Generate SBOM (Windows)
+        if: runner.os == 'Windows'
+        uses: anchore/sbom-action@v0
+        with:
+          file: libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip
+          format: spdx-json
+          output-file: libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.sbom.json
+
+      # ============================================================
+      # 5. SECURITY SCAN (Trivy)
+      # ============================================================
+      - name: Scan artifact with Trivy (Unix)
+        if: runner.os != 'Windows'
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'rootfs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan to GitHub Security
+        if: runner.os == 'Linux'
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      # ============================================================
+      # 6. TEST ARTIFACT (Verify tarball is usable)
+      # ============================================================
+      - name: Test artifact usability (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          TEST_DIR=$(mktemp -d)
+          tar -xzf libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.tar.gz -C "$TEST_DIR"
+
+          # Verify expected files exist
+          test -f "$TEST_DIR/dist/include/pqcsb.h" || (echo "Missing pqcsb.h"; exit 1)
+          test -f "$TEST_DIR/dist/pqcsb.pc" || (echo "Missing pqcsb.pc"; exit 1)
+
+          # Verify libraries exist
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            test -f "$TEST_DIR/dist/libpqcsb.a" || (echo "Missing libpqcsb.a"; exit 1)
+            test -f "$TEST_DIR/dist/libpqcsb.so"* || (echo "Missing libpqcsb.so"; exit 1)
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            test -f "$TEST_DIR/dist/libpqcsb.a" || (echo "Missing libpqcsb.a"; exit 1)
+            test -f "$TEST_DIR/dist/libpqcsb.dylib" || (echo "Missing libpqcsb.dylib"; exit 1)
+          fi
+
+          echo "✓ Artifact tarball is valid and contains all expected files"
+          rm -rf "$TEST_DIR"
+
+      - name: Test artifact usability (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $TestDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
+          Expand-Archive -Path "libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip" -DestinationPath $TestDir
+
+          # Verify expected files
+          if (-Not (Test-Path "$TestDir/dist/include/pqcsb.h")) {
+              throw "Missing pqcsb.h"
+          }
+          if (-Not (Test-Path "$TestDir/dist/pqcsb.pc")) {
+              throw "Missing pqcsb.pc"
+          }
+          if (-Not (Test-Path "$TestDir/dist/pqcsb.lib")) {
+              throw "Missing pqcsb.lib"
+          }
+          if (-Not (Test-Path "$TestDir/dist/pqcsb.dll")) {
+              throw "Missing pqcsb.dll"
+          }
+
+          Write-Host "✓ Artifact ZIP is valid and contains all expected files"
+          Remove-Item -Recurse -Force $TestDir
+
+      # ============================================================
+      # 7. COMPUTE HASHES (For SLSA provenance)
+      # ============================================================
+      - name: Compute artifact hashes
+        id: hash
+        shell: bash
+        run: |
+          # Create HASHES file
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            certutil -hashfile libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip SHA256 | grep -v "SHA256" > HASHES
+            certutil -hashfile libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.zip.sig SHA256 | grep -v "SHA256" >> HASHES
+          else
+            sha256sum libpqcsb-${{ github.ref_name }}-${{ matrix.artifact_prefix }}.* > HASHES
+          fi
+
+          # Output for SLSA
+          echo "hashes=$(cat HASHES | base64 -w0)" >> $GITHUB_OUTPUT
+
+      # ============================================================
+      # 8. UPLOAD ARTIFACTS (Staging)
+      # ============================================================
+      - name: Upload artifacts as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.artifact_prefix }}
+          path: |
             libpqcsb-*.tar.gz
             libpqcsb-*.tar.gz.sig
             libpqcsb-*.zip
             libpqcsb-*.zip.sig
-          tag_name: ${{ github.ref_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            libpqcsb-*.sbom.json
+            HASHES
 
-  publish-docs:
-    name: Publish documentation
+  # ============================================================
+  # 9. SLSA PROVENANCE (Supply chain security)
+  # ============================================================
+  provenance:
+    name: Generate SLSA provenance
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate SLSA provenance
+        uses: slsa-framework/slsa-github-generator@v1.9.0
+        with:
+          base64-subjects: ${{ needs.build-artifacts.outputs.hashes }}
+          upload-assets: true
+
+  # ============================================================
+  # 10. PUBLISH RELEASE
+  # ============================================================
+  publish:
+    name: Publish release
+    needs: [build-artifacts, provenance]
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Pages
-        uses: actions/configure-pages@v4
-
-      - name: Upload documentation
-        uses: actions/upload-pages-artifact@v3
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: '.'
+          path: release-artifacts
 
-  deploy-docs:
-    name: Deploy documentation to GitHub Pages
+      - name: Create release notes
+        id: release-notes
+        run: |
+          # Extract release notes from CHANGELOG.md
+          VERSION="${{ github.ref_name }}"
+          CHANGELOG_SECTION=$(sed -n "/^## \[$VERSION/,/^## \[/p" CHANGELOG.md | head -n -1)
+
+          if [[ -z "$CHANGELOG_SECTION" ]]; then
+              CHANGELOG_SECTION="See commits for details"
+          fi
+
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG_SECTION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Flatten artifact structure
+        run: |
+          mkdir -p flat-artifacts
+          find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.tar.gz.sig" -o -name "*.zip" -o -name "*.zip.sig" -o -name "*.sbom.json" -o -name "*.intoto.jsonl" \) -exec cp {} flat-artifacts/ \;
+          ls -lah flat-artifacts/
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v1
+        with:
+          files: flat-artifacts/*
+          body: ${{ steps.release-notes.outputs.notes }}
+          tag_name: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================
+  # OPTIONAL: Publish to package registries
+  # ============================================================
+  publish-conan:
+    name: Publish to Conan Center (optional)
+    needs: publish
     runs-on: ubuntu-latest
-    needs: publish-docs
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    if: false  # Disable for now - configure when Conan recipe ready
 
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v2
+      - uses: actions/checkout@v6
+
+      - name: Setup Conan
+        uses: conan-io/setup-conan-action@v1
+        with:
+          version: latest
+
+      - name: Create Conan package
+        run: |
+          conan create . --version=${{ github.ref_name }}
+
+      - name: Upload to Conan Center
+        env:
+          CONAN_LOGIN_USERNAME: ${{ secrets.CONAN_USERNAME }}
+          CONAN_LOGIN_PASSWORD: ${{ secrets.CONAN_PASSWORD }}
+        run: |
+          conan remote add conancenter https://center.conan.io || true
+          conan upload "*" --remote=conancenter
+
+  publish-homebrew:
+    name: Publish to Homebrew (optional)
+    needs: publish
+    runs-on: ubuntu-latest
+    if: false  # Disable for now - configure when formula ready
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Update Homebrew formula
+        run: |
+          # This would create a PR to homebrew-core with updated formula
+          # Requires creating a GitHub app token
+          echo "TODO: Implement Homebrew formula update"
