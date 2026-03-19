@@ -71,6 +71,11 @@ esac
 NEW_VERSION="$MAJOR.$MINOR.$PATCH"
 echo "New version: $NEW_VERSION"
 
+# Create and switch to release branch BEFORE making changes
+RELEASE_BRANCH="release/v$NEW_VERSION"
+echo "Creating release branch: $RELEASE_BRANCH"
+git checkout -b "$RELEASE_BRANCH"
+
 # Update CMakeLists.txt
 echo "Updating CMakeLists.txt..."
 sed -i.bak "s/VERSION $CURRENT_VERSION/VERSION $NEW_VERSION/" CMakeLists.txt
@@ -137,24 +142,25 @@ git commit -m "Release: Bump version to $NEW_VERSION
 - Updated include/pqcsb.h version constants
 - Generated CHANGELOG.md entry"
 
-# Create annotated tag
-echo "Creating git tag..."
-git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
-
-# Push commit and tag
-echo "Pushing to GitHub..."
-git push origin main
-git push origin "v$NEW_VERSION"
+# Push release branch to GitHub
+echo "Pushing release branch to GitHub..."
+git push -u origin "$RELEASE_BRANCH"
 
 echo ""
-echo "✓ Release v$NEW_VERSION prepared and pushed!"
+echo "✓ Release branch created and pushed!"
 echo ""
-echo "GitHub Actions will now:"
-echo "  1. Build on Linux, macOS, Windows"
-echo "  2. Sign with Cosign"
-echo "  3. Generate SBOM"
-echo "  4. Create SLSA provenance"
-echo "  5. Scan for vulnerabilities"
-echo "  6. Publish to GitHub Releases"
+echo "Next step:"
+echo "1. Open PR on GitHub: https://github.com/msuliq/libpqcsb/compare/$RELEASE_BRANCH"
+echo "2. Review and merge PR to main"
+echo ""
+echo "That's it! GitHub Actions will automatically:"
+echo "  ✓ Detect new version on main"
+echo "  ✓ Create release tag (v$NEW_VERSION)"
+echo "  ✓ Build on Linux, macOS, Windows"
+echo "  ✓ Sign artifacts with Cosign (keyless)"
+echo "  ✓ Generate SBOM + SLSA provenance"
+echo "  ✓ Scan for vulnerabilities"
+echo "  ✓ Publish to GitHub Releases"
+echo "  ✓ Ready for Homebrew/APT/Conan publishing"
 echo ""
 echo "Watch progress at: https://github.com/msuliq/libpqcsb/actions"
