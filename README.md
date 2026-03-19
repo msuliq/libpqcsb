@@ -1,7 +1,9 @@
 # libpqcsb - Secure Memory Buffer for Cryptographic Key Material
 
+[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/msuliq/libpqcsb/releases/tag/v0.1.2)
 [![C11 Standard](https://img.shields.io/badge/C-11-brightgreen.svg)]()
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/msuliq/libpqcsb/release.yml?label=release)](https://github.com/msuliq/libpqcsb/actions/workflows/release.yml)
 
 A standalone C library providing **mmap/mprotect/mlock-backed secure memory buffers** for cryptographic keys. Zero external dependencies. Portable across Linux, macOS, FreeBSD, and Windows.
 
